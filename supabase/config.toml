@@ -1,0 +1,11 @@
+project_id = "local-seo"
+
+[db]
+# Local database settings used by the Supabase CLI
+port = 54322
+
+[studio]
+port = 54323
+
+[api]
+port = 54321

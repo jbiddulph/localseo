@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Fraunces, Space_Grotesk } from "next/font/google";
 import "./globals.css";
+import MainNav from "./components/MainNav";
 
 const displayFont = Fraunces({
   variable: "--font-display",
@@ -30,6 +31,7 @@ export default function RootLayout({
       <body
         className={`${displayFont.variable} ${bodyFont.variable} antialiased`}
       >
+        <MainNav />
         {children}
       </body>
     </html>

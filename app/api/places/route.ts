@@ -39,13 +39,28 @@ function requireGoogleKey() {
 export async function POST(request: Request) {
   try {
     const apiKey = requireGoogleKey();
-    const body = (await request.json()) as { postcode?: string; query?: string };
+    const body = (await request.json()) as {
+      postcode?: string;
+      query?: string;
+      radius_km?: number;
+    };
     const postcode = body.postcode?.trim();
-    const query = body.query?.trim() || "dentist";
+    const query = body.query?.trim();
+    const radiusKm =
+      typeof body.radius_km === "number" && Number.isFinite(body.radius_km)
+        ? Math.max(body.radius_km, 0.5)
+        : 1.5;
 
     if (!postcode) {
       return Response.json(
         { error: "Postcode is required." },
+        { status: 400 }
+      );
+    }
+
+    if (!query) {
+      return Response.json(
+        { error: "Keyword is required." },
         { status: 400 }
       );
     }
@@ -72,11 +87,12 @@ export async function POST(request: Request) {
     }
 
     const location = geocodeData.results[0].geometry.location;
+    const radiusMeters = Math.round(radiusKm * 1000);
     const placesUrl = new URL(
       "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
     );
     placesUrl.searchParams.set("location", `${location.lat},${location.lng}`);
-    placesUrl.searchParams.set("radius", "1500");
+    placesUrl.searchParams.set("radius", String(radiusMeters));
     placesUrl.searchParams.set("keyword", query);
     placesUrl.searchParams.set("key", apiKey);
 

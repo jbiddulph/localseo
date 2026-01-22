@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import mapboxgl from "mapbox-gl";
+import { supabase } from "@/app/lib/supabase/client";
 
 type PlaceResult = {
   name: string;
@@ -10,6 +11,21 @@ type PlaceResult = {
   user_ratings_total?: number;
   vicinity?: string;
   location: { lat: number; lng: number };
+};
+
+type PostcodeCohort = {
+  id: string;
+  name: string;
+  postcode: string;
+  keyword: string | null;
+  radius_km: number | null;
+  business_name: string | null;
+};
+
+type PlacesPayload = {
+  center?: { lat: number; lng: number };
+  places?: PlaceResult[];
+  error?: string;
 };
 
 const fallbackLocations: PlaceResult[] = [
@@ -45,19 +61,35 @@ export default function MapPreview() {
   const markersRef = useRef<mapboxgl.Marker[]>([]);
   const token = process.env.NEXT_PUBLIC_MAPBOX_PUBLIC_KEY;
 
+  const [cohorts, setCohorts] = useState<PostcodeCohort[]>([]);
+  const [selectedCohort, setSelectedCohort] =
+    useState<PostcodeCohort | null>(null);
+  const [isLoadingCohorts, setIsLoadingCohorts] = useState(false);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+
   const [postcode, setPostcode] = useState("SW1A 1AA");
   const [query, setQuery] = useState("dentist");
+  const [radiusKm, setRadiusKm] = useState("1.5");
   const [places, setPlaces] = useState<PlaceResult[]>(fallbackLocations);
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [centerOverride, setCenterOverride] = useState<{
+    lat: number;
+    lng: number;
+  } | null>(null);
 
   const center = useMemo(() => {
+    if (centerOverride) {
+      return [centerOverride.lng, centerOverride.lat] as [number, number];
+    }
     if (places.length === 0) {
       return [-0.1276, 51.5072] as [number, number];
     }
     const first = places[0];
     return [first.location.lng, first.location.lat] as [number, number];
-  }, [places]);
+  }, [places, centerOverride]);
 
   useEffect(() => {
     if (!token || !mapContainer.current) {
@@ -86,6 +118,46 @@ export default function MapPreview() {
       map.remove();
     };
   }, [token]);
+
+  useEffect(() => {
+    const loadCohorts = async () => {
+      setIsLoadingCohorts(true);
+      const { data } = await supabase.auth.getUser();
+      const currentUser = data.user;
+      setUserEmail(currentUser?.email ?? null);
+      setUserId(currentUser?.id ?? null);
+
+      if (!currentUser) {
+        setCohorts([]);
+        setSelectedCohort(null);
+        setIsLoadingCohorts(false);
+        return;
+      }
+
+      const { data: cohortData, error } = await supabase
+        .from("localseo_postcode_cohorts")
+        .select("id,name,postcode,keyword,radius_km,business_name")
+        .eq("owner_id", currentUser.id)
+        .order("created_at", { ascending: false });
+
+      if (!error) {
+        setCohorts(cohortData ?? []);
+      }
+      setIsLoadingCohorts(false);
+    };
+
+    loadCohorts();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(() => {
+      loadCohorts();
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (!mapRef.current) {
@@ -128,18 +200,26 @@ export default function MapPreview() {
   const handleSearch = async () => {
     setStatus("loading");
     setErrorMessage(null);
+    setSaveMessage(null);
+
+    if (!query.trim()) {
+      setStatus("error");
+      setErrorMessage("Keyword is required.");
+      return;
+    }
 
     try {
       const response = await fetch("/api/places", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ postcode, query }),
+        body: JSON.stringify({
+          postcode,
+          query,
+          radius_km: radiusKm ? Number(radiusKm) : undefined,
+        }),
       });
 
-      const payload = (await response.json()) as {
-        places?: PlaceResult[];
-        error?: string;
-      };
+      const payload = (await response.json()) as PlacesPayload;
 
       if (!response.ok) {
         throw new Error(
@@ -148,12 +228,139 @@ export default function MapPreview() {
       }
 
       const placesResult = payload.places ?? [];
+      if (payload.center) {
+        setCenterOverride(payload.center);
+      }
       setPlaces(placesResult.length ? placesResult : []);
       setStatus("idle");
+
+      if (selectedCohort && userId && placesResult.length) {
+        const { data: latestSnapshots, error: latestError } = await supabase
+          .from("localseo_rank_snapshots")
+          .select("id")
+          .eq("owner_id", userId)
+          .eq("cohort_id", selectedCohort.id)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (latestError) {
+          setErrorMessage(latestError.message);
+          setStatus("error");
+          return;
+        }
+
+        const latestSnapshotId = latestSnapshots?.[0]?.id ?? null;
+
+        let hasChanges = true;
+        if (latestSnapshotId) {
+          const { data: previousItems, error: itemsError } = await supabase
+            .from("localseo_rank_snapshot_items")
+            .select("place_id,rank,rating,user_ratings_total")
+            .eq("snapshot_id", latestSnapshotId);
+
+          if (itemsError) {
+            setErrorMessage(itemsError.message);
+            setStatus("error");
+            return;
+          }
+
+          if (previousItems && previousItems.length) {
+            const previousMap = new Map(
+              previousItems.map((item) => [
+                item.place_id,
+                {
+                  rank: item.rank,
+                  rating: item.rating ?? null,
+                  user_ratings_total: item.user_ratings_total ?? null,
+                },
+              ])
+            );
+
+            hasChanges =
+              previousItems.length !== placesResult.length ||
+              placesResult.some((place, index) => {
+                const prev = previousMap.get(place.place_id);
+                if (!prev) return true;
+                const nextRank = index + 1;
+                const nextRating = place.rating ?? null;
+                const nextTotal = place.user_ratings_total ?? null;
+                return (
+                  prev.rank !== nextRank ||
+                  prev.rating !== nextRating ||
+                  prev.user_ratings_total !== nextTotal
+                );
+              });
+          }
+        }
+
+        if (!hasChanges) {
+          setSaveMessage("No changes detected since the last snapshot.");
+          setStatus("idle");
+          return;
+        }
+
+        const { data: snapshot, error: snapshotError } = await supabase
+          .from("localseo_rank_snapshots")
+          .insert({
+            cohort_id: selectedCohort.id,
+            owner_id: userId,
+            keyword: query.trim(),
+            postcode: postcode.trim(),
+            radius_km: radiusKm ? Number(radiusKm) : null,
+            center_lat: payload.center?.lat ?? null,
+            center_lng: payload.center?.lng ?? null,
+          })
+          .select("id")
+          .single();
+
+        if (snapshotError) {
+          setErrorMessage(snapshotError.message);
+          setStatus("error");
+          return;
+        }
+
+        const items = placesResult.map((place, index) => ({
+          snapshot_id: snapshot.id,
+          place_id: place.place_id,
+          name: place.name,
+          rank: index + 1,
+          rating: place.rating ?? null,
+          user_ratings_total: place.user_ratings_total ?? null,
+          vicinity: place.vicinity ?? null,
+          lat: place.location.lat,
+          lng: place.location.lng,
+        }));
+
+        const { error: itemsError } = await supabase
+          .from("localseo_rank_snapshot_items")
+          .insert(items);
+
+        if (itemsError) {
+          setErrorMessage(itemsError.message);
+          setStatus("error");
+        } else {
+          setSaveMessage("Snapshot saved.");
+          window.dispatchEvent(new Event("localseo:snapshot-saved"));
+        }
+      }
     } catch (error) {
       setStatus("error");
       setErrorMessage(
         error instanceof Error ? error.message : "Something went wrong."
+      );
+    }
+  };
+
+  const handleCohortChange = (value: string) => {
+    const cohort = cohorts.find((item) => item.id === value) ?? null;
+    setSelectedCohort(cohort);
+    if (cohort) {
+      setPostcode(cohort.postcode);
+      setQuery(cohort.keyword ?? "");
+      setRadiusKm(
+        cohort.radius_km !== null && cohort.radius_km !== undefined
+          ? String(cohort.radius_km)
+          : "1.5"
       );
     }
   };
@@ -170,6 +377,36 @@ export default function MapPreview() {
   return (
     <div className="flex h-full min-h-[280px] flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/70 bg-white/80 p-3 text-xs shadow-sm">
+        <div className="flex flex-1 flex-wrap items-center gap-2">
+          <select
+            value={selectedCohort?.id ?? ""}
+            onChange={(event) => handleCohortChange(event.target.value)}
+            className="w-full rounded-full border border-transparent bg-white px-4 py-2 text-sm shadow-inner outline-none transition focus:border-[#101018]/20 sm:w-[220px]"
+          >
+            <option value="">
+              {isLoadingCohorts
+                ? "Loading cohorts..."
+                : userEmail
+                ? "Select a cohort"
+                : "Sign in to load cohorts"}
+            </option>
+            {cohorts.map((cohort) => (
+              <option key={cohort.id} value={cohort.id}>
+                {cohort.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={handleSearch}
+            disabled={
+              status === "loading" || !selectedCohort || !postcode.trim()
+            }
+            className="rounded-full border border-[#101018]/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-[#101018] transition hover:border-[#101018] disabled:opacity-60"
+          >
+            {status === "loading" ? "Running..." : "Run cohort search"}
+          </button>
+        </div>
         <input
           value={postcode}
           onChange={(event) => setPostcode(event.target.value)}
@@ -179,8 +416,17 @@ export default function MapPreview() {
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Business type"
+          placeholder="Required keyword"
           className="w-full rounded-full border border-transparent bg-white px-4 py-2 text-sm shadow-inner outline-none transition focus:border-[#101018]/20 sm:w-[160px]"
+        />
+        <input
+          type="number"
+          min="0.5"
+          step="0.5"
+          value={radiusKm}
+          onChange={(event) => setRadiusKm(event.target.value)}
+          placeholder="Radius (km)"
+          className="w-full rounded-full border border-transparent bg-white px-4 py-2 text-sm shadow-inner outline-none transition focus:border-[#101018]/20 sm:w-[120px]"
         />
         <button
           type="button"
@@ -195,6 +441,11 @@ export default function MapPreview() {
             {errorMessage}
           </span>
         ) : null}
+        {saveMessage ? (
+          <span className="text-xs font-semibold text-[#136a4b]">
+            {saveMessage}
+          </span>
+        ) : null}
       </div>
 
       <div className="relative h-full min-h-[280px] overflow-hidden rounded-3xl border border-white/70 bg-white/80 shadow-[0_20px_60px_-30px_rgba(0,0,0,0.3)]">
@@ -205,12 +456,55 @@ export default function MapPreview() {
       </div>
 
       <div className="grid gap-2 text-xs text-[#4f4a3d] sm:grid-cols-2">
-        {places.map((place) => (
+        {selectedCohort?.business_name ? (
+          <div className="sm:col-span-2 rounded-2xl border border-white/70 bg-white/80 px-3 py-2 text-xs text-[#4f4a3d]">
+            Your business:{" "}
+            <span className="font-semibold text-[#101018]">
+              {selectedCohort.business_name}
+            </span>
+            {(() => {
+              const match = places.find((place) =>
+                place.name
+                  .toLowerCase()
+                  .includes(selectedCohort.business_name!.toLowerCase())
+              );
+              if (!match) {
+                return (
+                  <span className="ml-2 text-[#8b2f1b]">
+                    Not in top {places.length || 0}
+                  </span>
+                );
+              }
+              const rank =
+                places.findIndex((place) => place.place_id === match.place_id) +
+                1;
+              return (
+                <span className="ml-2 text-[#136a4b]">Rank #{rank}</span>
+              );
+            })()}
+          </div>
+        ) : null}
+        {places.map((place, index) => (
           <div
             key={place.place_id}
             className="rounded-2xl border border-white/70 bg-white/80 px-3 py-2"
           >
-            <p className="font-semibold text-[#101018]">{place.name}</p>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="rounded-full bg-[#101018] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-white">
+                  #{index + 1}
+                </span>
+                <p className="font-semibold text-[#101018]">{place.name}</p>
+              </div>
+              {selectedCohort?.business_name &&
+              place.name
+                .toLowerCase()
+                .includes(selectedCohort.business_name.toLowerCase()) ? (
+                <span className="rounded-full bg-[#101018] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.2em] text-white">
+                  Your business
+                </span>
+              ) : null}
+            </div>
             <p>
               {place.rating ? `Rating ${place.rating} · ` : ""}
               {place.vicinity ?? "Area match"}
