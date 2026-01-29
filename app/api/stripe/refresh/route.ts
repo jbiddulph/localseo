@@ -69,13 +69,16 @@ export async function POST() {
     sorted.find((subscription) => subscription.status !== "canceled") ??
     sorted[0];
 
+  const firstItem = latest.items.data[0] ?? null;
+  const currentPeriodEnd = firstItem?.current_period_end ?? null;
+
   await supabase.from("localseo_subscriptions").upsert({
     owner_id: user.id,
     stripe_subscription_id: latest.id,
     price_id: latest.items.data[0]?.price.id ?? null,
     status: latest.status,
-    current_period_end: latest.current_period_end
-      ? new Date(latest.current_period_end * 1000).toISOString()
+    current_period_end: currentPeriodEnd
+      ? new Date(currentPeriodEnd * 1000).toISOString()
       : null,
     cancel_at_period_end: latest.cancel_at_period_end ?? false,
     trial_end: latest.trial_end
