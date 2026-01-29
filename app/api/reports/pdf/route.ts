@@ -93,7 +93,8 @@ export async function GET(request: Request) {
       margin: { top: "20px", bottom: "20px", left: "20px", right: "20px" },
     });
     await reportPage.close();
-    return new Response(pdfBuffer, {
+    const pdfBytes = new Uint8Array(pdfBuffer);
+    return new Response(pdfBytes, {
       headers: {
         "Content-Type": "application/pdf",
         "Content-Disposition": `attachment; filename=\"${slug}-report.pdf\"`,
