@@ -21,6 +21,30 @@ type MovementRow = {
   delta: number;
 };
 
+function getLatestPair(
+  snapshotPairs: Map<string, SnapshotRow[]>
+): [SnapshotRow, SnapshotRow] | null {
+  let latestPair: [SnapshotRow, SnapshotRow] | null = null;
+
+  snapshotPairs.forEach((pair) => {
+    if (pair.length < 2) return;
+    const candidate: [SnapshotRow, SnapshotRow] = [pair[0], pair[1]];
+
+    if (!latestPair) {
+      latestPair = candidate;
+      return;
+    }
+
+    const currentLatest = new Date(latestPair[0].created_at).getTime();
+    const candidateLatest = new Date(candidate[0].created_at).getTime();
+    if (candidateLatest > currentLatest) {
+      latestPair = candidate;
+    }
+  });
+
+  return latestPair;
+}
+
 export default function LiveMovement() {
   const [movement, setMovement] = useState<MovementRow[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "signed-out">(
@@ -47,7 +71,8 @@ export default function LiveMovement() {
         .limit(20);
 
       const snapshotPairs = new Map<string, SnapshotRow[]>();
-      (snapshots ?? []).forEach((snapshot) => {
+      const typedSnapshots = (snapshots ?? []) as SnapshotRow[];
+      typedSnapshots.forEach((snapshot) => {
         const list = snapshotPairs.get(snapshot.cohort_id) ?? [];
         if (list.length < 2) {
           list.push(snapshot);
@@ -55,19 +80,7 @@ export default function LiveMovement() {
         }
       });
 
-      let latestPair: SnapshotRow[] | null = null;
-      snapshotPairs.forEach((pair) => {
-        if (pair.length < 2) return;
-        if (!latestPair) {
-          latestPair = pair;
-          return;
-        }
-        const currentLatest = new Date(latestPair[0].created_at).getTime();
-        const candidateLatest = new Date(pair[0].created_at).getTime();
-        if (candidateLatest > currentLatest) {
-          latestPair = pair;
-        }
-      });
+      const latestPair = getLatestPair(snapshotPairs);
 
       if (!latestPair) {
         setMovement([]);

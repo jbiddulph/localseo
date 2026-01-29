@@ -7,15 +7,26 @@ const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
 export async function proxy(request: NextRequest) {
   let response = NextResponse.next({ request: { headers: request.headers } });
 
+  const getCookie = (name: string) => request.cookies.get(name)?.value;
+  const setCookie = (
+    name: string,
+    value: string,
+    options?: Parameters<typeof response.cookies.set>[2]
+  ) => {
+    response.cookies.set(name, value, options);
+  };
+  const removeCookie = (
+    name: string,
+    options?: Parameters<typeof response.cookies.set>[2]
+  ) => {
+    response.cookies.set(name, "", options);
+  };
+
   const supabase = createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
-      get: (name) => request.cookies.get(name)?.value,
-      set: (name, value, options) => {
-        response.cookies.set({ name, value, ...options });
-      },
-      remove: (name, options) => {
-        response.cookies.set({ name, value: "", ...options });
-      },
+      get: getCookie,
+      set: setCookie,
+      remove: removeCookie,
     },
   });
 

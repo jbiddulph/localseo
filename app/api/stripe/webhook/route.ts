@@ -6,7 +6,7 @@ import { getSupabaseAdmin } from "@/app/lib/supabase/admin";
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
-  const signature = headers().get("stripe-signature");
+  const signature = (await headers()).get("stripe-signature");
   const body = await request.text();
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
 
@@ -34,7 +34,9 @@ export async function POST(request: Request) {
     if (!ownerId) {
       const customer = await stripe.customers.retrieve(customerId);
       const userId =
-        typeof customer !== "string" && customer.metadata.user_id
+        "deleted" in customer
+          ? null
+          : customer.metadata.user_id
           ? customer.metadata.user_id
           : null;
       if (userId) {
@@ -47,13 +49,16 @@ export async function POST(request: Request) {
       return;
     }
 
+    const firstItem = subscription.items.data[0] ?? null;
+    const currentPeriodEnd = firstItem?.current_period_end ?? null;
+
     await supabaseAdmin.from("localseo_subscriptions").upsert({
       owner_id: resolvedOwnerId,
       stripe_subscription_id: subscription.id,
       price_id: priceId,
       status: subscription.status,
-      current_period_end: subscription.current_period_end
-        ? new Date(subscription.current_period_end * 1000).toISOString()
+      current_period_end: currentPeriodEnd
+        ? new Date(currentPeriodEnd * 1000).toISOString()
         : null,
       cancel_at_period_end: subscription.cancel_at_period_end ?? false,
       trial_end: subscription.trial_end

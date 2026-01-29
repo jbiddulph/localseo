@@ -15,12 +15,16 @@ export const createSupabaseServerClient = async () => {
 
   return createServerClient(supabaseUrl, supabaseAnonKey, {
     cookies: {
-      get: (name) => cookieStore.get(name)?.value,
-      set: (name, value, options) => {
-        cookieStore.set({ name, value, ...options });
+      get: (name: string) => cookieStore.get(name)?.value,
+      set: (
+        name: string,
+        value: string,
+        options?: Parameters<typeof cookieStore.set>[2]
+      ) => {
+        cookieStore.set(name, value, options);
       },
-      remove: (name, options) => {
-        cookieStore.set({ name, value: "", ...options });
+      remove: (name: string, options?: Parameters<typeof cookieStore.set>[2]) => {
+        cookieStore.set(name, "", options);
       },
     },
   });
