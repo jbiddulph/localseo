@@ -25,12 +25,19 @@ export default function DashboardPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const [formSuccess, setFormSuccess] = useState<string | null>(null);
+  const [shareLinks, setShareLinks] = useState<Record<string, string>>({});
+  const [shareStatus, setShareStatus] = useState<Record<string, string>>({});
+  const [isPro, setIsPro] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [name, setName] = useState("");
   const [postcode, setPostcode] = useState("");
   const [keyword, setKeyword] = useState("");
   const [radiusKm, setRadiusKm] = useState("3");
   const [businessName, setBusinessName] = useState("");
   const [notes, setNotes] = useState("");
+  const [frequency, setFrequency] = useState<"weekly" | "daily">("weekly");
+  const [dayOfWeek, setDayOfWeek] = useState("1");
+  const [hourUtc, setHourUtc] = useState("9");
 
   const fetchCohorts = async (ownerId: string) => {
     const { data, error } = await supabase
@@ -56,6 +63,14 @@ export default function DashboardPage() {
       setUserId(data.user?.id ?? null);
       if (data.user?.id) {
         await fetchCohorts(data.user.id);
+        const { data: subscription } = await supabase
+          .from("localseo_subscriptions")
+          .select("status,trial_end,current_period_end")
+          .eq("owner_id", data.user.id)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        setIsPro(Boolean(subscription?.status) && subscription?.status !== "canceled");
       } else {
         setCohorts([]);
       }
@@ -71,6 +86,16 @@ export default function DashboardPage() {
       setUserId(session?.user?.id ?? null);
       if (session?.user?.id) {
         fetchCohorts(session.user.id);
+        supabase
+          .from("localseo_subscriptions")
+          .select("status")
+          .eq("owner_id", session.user.id)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle()
+          .then(({ data }) => {
+            setIsPro(Boolean(data?.status) && data?.status !== "canceled");
+          });
       } else {
         setCohorts([]);
       }
@@ -100,6 +125,11 @@ export default function DashboardPage() {
       return;
     }
 
+    if (!isPro && cohorts.length >= 1) {
+      setFormError("Free plan allows 1 cohort. Upgrade to add more.");
+      return;
+    }
+
     if (!name.trim() || !postcode.trim()) {
       setFormError("Cohort name and postcode are required.");
       return;
@@ -123,6 +153,27 @@ export default function DashboardPage() {
       return;
     }
 
+    const { data: createdCohort } = await supabase
+      .from("localseo_postcode_cohorts")
+      .select("id")
+      .eq("owner_id", userId)
+      .eq("name", name.trim())
+      .eq("postcode", postcode.trim())
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (createdCohort?.id) {
+      await supabase.from("localseo_tracking_schedules").insert({
+        owner_id: userId,
+        cohort_id: createdCohort.id,
+        frequency,
+        day_of_week: frequency === "weekly" ? Number(dayOfWeek) : null,
+        hour_utc: Number(hourUtc),
+        is_active: true,
+      });
+    }
+
     setFormSuccess("Cohort saved. Ready to start tracking.");
     setName("");
     setPostcode("");
@@ -130,8 +181,84 @@ export default function DashboardPage() {
     setRadiusKm("3");
     setBusinessName("");
     setNotes("");
+    setFrequency("weekly");
+    setDayOfWeek("1");
+    setHourUtc("9");
     await fetchCohorts(userId);
     setIsSaving(false);
+  };
+
+  const handleCreateReport = async (cohortId: string) => {
+    setShareStatus((prev) => ({ ...prev, [cohortId]: "creating" }));
+    if (!isPro) {
+      setShareStatus((prev) => ({
+        ...prev,
+        [cohortId]: "Upgrade to Pro to create shareable reports.",
+      }));
+      return;
+    }
+    const response = await fetch("/api/reports/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cohortId }),
+    });
+
+    const raw = await response.text();
+    const payload = raw ? JSON.parse(raw) : {};
+
+    if (!response.ok) {
+      setShareStatus((prev) => ({
+        ...prev,
+        [cohortId]: payload.error || "Failed to create report.",
+      }));
+      return;
+    }
+
+    if (payload.url && payload.slug) {
+      setShareLinks((prev) => ({
+        ...prev,
+        [cohortId]: payload.url,
+      }));
+      setShareStatus((prev) => ({ ...prev, [cohortId]: "ready" }));
+    } else {
+      setShareStatus((prev) => ({
+        ...prev,
+        [cohortId]: "Report created but response was incomplete.",
+      }));
+    }
+  };
+
+  const handleRefreshBilling = async () => {
+    setFormError(null);
+    setFormSuccess(null);
+    setIsRefreshing(true);
+    try {
+      const response = await fetch("/api/stripe/refresh", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) {
+        setFormError(payload.error || "Unable to refresh billing status.");
+        return;
+      }
+      setFormSuccess("Billing status refreshed.");
+      if (userId) {
+        const { data: subscription } = await supabase
+          .from("localseo_subscriptions")
+          .select("status")
+          .eq("owner_id", userId)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        setIsPro(
+          Boolean(subscription?.status) && subscription?.status !== "canceled"
+        );
+      }
+    } catch (error) {
+      setFormError(
+        error instanceof Error ? error.message : "Unable to refresh billing."
+      );
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   return (
@@ -176,6 +303,67 @@ export default function DashboardPage() {
                   Create account
                 </Link>
               </>
+            )}
+            {email ? (
+              <button
+                type="button"
+                onClick={handleRefreshBilling}
+                disabled={isRefreshing}
+                className="rounded-full border border-[#101018]/20 bg-white px-6 py-3 text-sm font-semibold text-[#101018] transition hover:border-[#101018] disabled:opacity-60"
+              >
+                {isRefreshing ? "Refreshing..." : "Refresh billing status"}
+              </button>
+            ) : null}
+            {!isPro ? (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const response = await fetch("/api/stripe/checkout", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ plan: "monthly" }),
+                    });
+                    const payload = await response.json();
+                    if (!response.ok) {
+                      setFormError(
+                        payload.error || "Unable to start checkout."
+                      );
+                      return;
+                    }
+                    if (payload.url) {
+                      window.location.href = payload.url;
+                    } else {
+                      setFormError("Missing checkout URL.");
+                    }
+                  } catch (error) {
+                    setFormError(
+                      error instanceof Error
+                        ? error.message
+                        : "Checkout failed."
+                    );
+                  }
+                }}
+                className="rounded-full bg-[#101018] px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-[#101018]/20 transition hover:-translate-y-0.5"
+              >
+                Upgrade to Pro
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={async () => {
+                  const response = await fetch("/api/stripe/portal", {
+                    method: "POST",
+                  });
+                  const payload = await response.json();
+                  if (payload.url) {
+                    window.location.href = payload.url;
+                  }
+                }}
+                className="rounded-full border border-[#101018]/20 bg-white px-6 py-3 text-sm font-semibold text-[#101018] transition hover:border-[#101018]"
+              >
+                Manage billing
+              </button>
             )}
           </div>
         </div>
@@ -263,6 +451,55 @@ export default function DashboardPage() {
               />
             </label>
 
+            <div className="grid gap-4 md:grid-cols-3">
+              <label className="text-xs font-semibold uppercase tracking-[0.2em] text-[#8a836e]">
+                Frequency
+                <select
+                  value={frequency}
+                  onChange={(event) =>
+                    setFrequency(event.target.value as "weekly" | "daily")
+                  }
+                  className="mt-2 w-full rounded-2xl border border-white/70 bg-white px-4 py-3 text-sm shadow-inner outline-none focus:border-[#101018]/20"
+                >
+                  <option value="weekly">Weekly</option>
+                  <option value="daily">Daily</option>
+                </select>
+              </label>
+
+              <label className="text-xs font-semibold uppercase tracking-[0.2em] text-[#8a836e]">
+                Day (UTC)
+                <select
+                  value={dayOfWeek}
+                  onChange={(event) => setDayOfWeek(event.target.value)}
+                  disabled={frequency === "daily"}
+                  className="mt-2 w-full rounded-2xl border border-white/70 bg-white px-4 py-3 text-sm shadow-inner outline-none focus:border-[#101018]/20 disabled:opacity-60"
+                >
+                  <option value="0">Sunday</option>
+                  <option value="1">Monday</option>
+                  <option value="2">Tuesday</option>
+                  <option value="3">Wednesday</option>
+                  <option value="4">Thursday</option>
+                  <option value="5">Friday</option>
+                  <option value="6">Saturday</option>
+                </select>
+              </label>
+
+              <label className="text-xs font-semibold uppercase tracking-[0.2em] text-[#8a836e]">
+                Hour (UTC)
+                <select
+                  value={hourUtc}
+                  onChange={(event) => setHourUtc(event.target.value)}
+                  className="mt-2 w-full rounded-2xl border border-white/70 bg-white px-4 py-3 text-sm shadow-inner outline-none focus:border-[#101018]/20"
+                >
+                  {Array.from({ length: 24 }).map((_, idx) => (
+                    <option key={idx} value={String(idx)}>
+                      {String(idx).padStart(2, "0")}:00
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
             {formError ? (
               <p className="rounded-2xl border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-[#8b2f1b]">
                 {formError}
@@ -282,6 +519,12 @@ export default function DashboardPage() {
             >
               {isSaving ? "Saving..." : "Create cohort"}
             </button>
+            {!isPro ? (
+              <div className="mt-2 rounded-2xl border border-amber-200 bg-amber-50/70 px-4 py-2 text-xs text-amber-900">
+                Free plan includes 1 cohort and 1 scan. Upgrade to unlock
+                unlimited cohorts, scans, and daily tracking.
+              </div>
+            ) : null}
           </form>
         </div>
 
@@ -320,6 +563,32 @@ export default function DashboardPage() {
                         Business: {cohort.business_name}
                       </p>
                     ) : null}
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => handleCreateReport(cohort.id)}
+                        className="rounded-full border border-[#101018]/20 px-3 py-1 font-semibold text-[#101018] transition hover:border-[#101018]"
+                      >
+                        {shareStatus[cohort.id] === "creating"
+                          ? "Creating..."
+                          : "Create report link"}
+                      </button>
+                      {shareLinks[cohort.id] ? (
+                        <a
+                          href={shareLinks[cohort.id]}
+                          className="rounded-full border border-[#101018]/20 px-3 py-1 font-semibold text-[#101018] transition hover:border-[#101018]"
+                        >
+                          View report
+                        </a>
+                      ) : null}
+                      {shareStatus[cohort.id] &&
+                      shareStatus[cohort.id] !== "creating" &&
+                      shareStatus[cohort.id] !== "ready" ? (
+                        <span className="text-[#8b2f1b]">
+                          {shareStatus[cohort.id]}
+                        </span>
+                      ) : null}
+                    </div>
                   </div>
                 ))}
               </div>
