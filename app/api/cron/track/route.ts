@@ -4,6 +4,15 @@ import { fetchPlacesByPostcode } from "@/app/lib/google/places";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+type CohortRow = {
+  id: string;
+  name: string;
+  postcode: string;
+  keyword: string | null;
+  radius_km: number | null;
+  business_name: string | null;
+};
+
 type ScheduleRow = {
   id: string;
   owner_id: string;
@@ -13,14 +22,11 @@ type ScheduleRow = {
   hour_utc: number;
   is_active: boolean;
   last_run_at: string | null;
-  cohort: {
-    id: string;
-    name: string;
-    postcode: string;
-    keyword: string | null;
-    radius_km: number | null;
-    business_name: string | null;
-  };
+  cohort: CohortRow | null;
+};
+
+type ScheduleRowRaw = Omit<ScheduleRow, "cohort"> & {
+  cohort: CohortRow[] | null;
 };
 
 type SnapshotItem = {
@@ -163,7 +169,15 @@ export async function GET(request: Request) {
     return Response.json({ error: error.message }, { status: 500 });
   }
 
-  const due = (schedules as ScheduleRow[]).filter((schedule) =>
+  const normalizedSchedules = (schedules ?? []).map((schedule) => {
+    const row = schedule as ScheduleRowRaw;
+    return {
+      ...row,
+      cohort: Array.isArray(row.cohort) ? row.cohort[0] ?? null : row.cohort,
+    } as ScheduleRow;
+  });
+
+  const due = normalizedSchedules.filter((schedule) =>
     isDue(schedule, now)
   );
 
